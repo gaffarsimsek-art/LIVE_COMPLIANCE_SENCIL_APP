@@ -2,7 +2,7 @@ import streamlit as st
 import pandas as pd
 import xml.etree.ElementTree as ET
 
-# 1. DE REKENMOTOR & PARSER
+# 1. PARSER VOOR DE DATA
 def deep_parse_xaf(file_content):
     try:
         root = ET.fromstring(file_content)
@@ -13,7 +13,8 @@ def deep_parse_xaf(file_content):
             try:
                 acc_id = line.find('accID').text if line.find('accID') is not None else ""
                 desc = line.find('description').text if line.find('description') is not None else ""
-                amnt = float(line.find('amnt').text) if line.find('amnt') is not None else 0.0
+                amnt_el = line.find('amnt')
+                amnt = float(amnt_el.text) if (amnt_el is not None and amnt_el.text) else 0.0
                 if amnt != 0:
                     data.append({'rekening': acc_id, 'omschrijving': desc, 'bedrag': abs(amnt)})
             except: continue
@@ -29,8 +30,8 @@ def scan_voor_subsidies(df):
         acc = str(row['rekening'])
         bedrag = row['bedrag']
         
-        # Investerings-radar (Rekeningen onder 1000 of specifieke termen)
-        is_invest = (acc.isdigit() and int(acc) < 1000) or any(t in desc for t in ['hp', 'computer', 'laptop', 'machine', 'bus'])
+        # Investerings-radar: Rekeningen < 1000 (Balans) of trefwoorden
+        is_invest = (acc.isdigit() and 0 < int(acc) < 1000) or any(t in desc for t in ['hp', 'computer', 'laptop', 'machine'])
         is_green = any(t in desc for t in ['elektr', 'zonne', 'laad', 'warmtepomp'])
 
         if is_green and bedrag > 2000:
@@ -39,48 +40,45 @@ def scan_voor_subsidies(df):
             results.append({"Type": "KIA Potentieel", "Item": row['omschrijving'], "Bedrag": bedrag, "Fiscaal Voordeel": bedrag * 0.28})
     return results
 
-# 2. DE LOOK & FEEL (HET ZWARTE DASHBOARD)
-st.set_page_config(page_title="Compliance Sencil | Enterprise Hub", layout="wide")
+# 2. INTERFACE (NU MET VEILIGE KLEUREN)
+st.set_page_config(page_title="Compliance Sencil", layout="wide")
 
+# CSS voor een strakke look maar mét zichtbare tekst
 st.markdown("""
     <style>
-    .main { background-color: #080a0f; color: #e0e0e0; }
-    .stMetric { 
-        background-color: #11151c; 
-        padding: 20px; 
-        border-radius: 15px; 
-        border-top: 4px solid #00ff41;
-        box-shadow: 0 4px 15px rgba(0,255,65,0.1);
-    }
-    [data-testid="stMetricValue"] { color: #00ff41 !important; font-family: 'Courier New', monospace; }
-    .stTable { background-color: #11151c; border-radius: 10px; }
+    .stApp { background-color: #0e1117; }
+    h1, h2, h3, p { color: white !important; }
+    .stMetric { background-color: #161b22; border: 1px solid #30363d; border-radius: 10px; padding: 20px; }
+    [data-testid="stMetricValue"] { color: #00ff41 !important; }
     </style>
     """, unsafe_allow_html=True)
 
 st.title("🛡️ Compliance Sencil | Enterprise Hub")
-st.write("---")
+st.write("Analyseer uw Snelstart Auditfile op fiscale kansen.")
 
-uploaded_file = st.file_uploader("📂 Sleep hier de Auditfile (.xaf) van je klant", type=["xaf"])
+uploaded_file = st.file_uploader("Upload hier het .xaf bestand", type=["xaf"])
 
 if uploaded_file:
-    df = deep_parse_xaf(uploaded_file.getvalue())
-    if not df.empty:
-        hits = scan_voor_subsidies(df)
+    with st.spinner('Bezig met diepte-analyse...'):
+        df = deep_parse_xaf(uploaded_file.getvalue())
         
-        # Dashboard Cijfers
-        c1, c2, c3 = st.columns(3)
-        totaal_voordeel = sum([h['Fiscaal Voordeel'] for h in hits]) if hits else 0
-        
-        c1.metric("TOTAAL FISCAAL VOORDEEL", f"€ {totaal_voordeel:,.2f}")
-        c2.metric("GEDETECTEERDE KANSEN", len(hits))
-        c3.metric("ANALYSE STATUS", "OPTIMAAL")
-        
-        st.write("### 🔍 Gedetecteerde Investeringen")
-        if hits:
-            st.table(pd.DataFrame(hits))
+        if not df.empty:
+            hits = scan_voor_subsidies(df)
+            
+            # Dashboard
+            c1, c2, c3 = st.columns(3)
+            totaal = sum([h['Fiscaal Voordeel'] for h in hits]) if hits else 0
+            
+            c1.metric("TOTAAL FISCAAL VOORDEEL", f"€ {totaal:,.2f}")
+            c2.metric("GEDETECTEERDE KANSEN", len(hits))
+            c3.metric("ANALYSE STATUS", "OPTIMAAL")
+            
+            if hits:
+                st.write("### Gevonden Investeringen")
+                st.dataframe(pd.DataFrame(hits), use_container_width=True)
+            else:
+                st.info("Geen investeringen boven de €450 herkend.")
         else:
-            st.info("Geen investeringen boven de €450 herkend in deze file.")
-    else:
-        st.error("Bestand kon niet worden gelezen. Controleer of het een Snelstart XAF bestand is.")
+            st.error("Het bestand bevat geen leesbare transacties.")
 else:
-    st.info("Upload een bestand om de scan te starten.")
+    st.info("Klaar voor analyse. Sleep een Auditfile in het vak hierboven.")
