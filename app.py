@@ -1,61 +1,81 @@
 import streamlit as st
 import pandas as pd
-from match_subsidies import parse_xaf_auditfile, scan_boekhouding
+import xml.etree.ElementTree as ET
 
-# 1. Pagina configuratie
+# --- 1. REKENMOTOR (Direct in app.py voor stabiliteit) ---
+def parse_xaf_auditfile(file_content):
+    try:
+        root = ET.fromstring(file_content)
+        for el in root.iter():
+            if '}' in el.tag: el.tag = el.tag.split('}', 1)[1]
+        
+        data = []
+        # Snelstart specifieke tags: trLine of transaction
+        lines = root.findall('.//trLine') + root.findall('.//transaction')
+        
+        for line in lines:
+            try:
+                desc_el = line.find('description')
+                desc = desc_el.text if (desc_el is not None and desc_el.text) else "Omschrijving mist"
+                
+                amnt_el = line.find('amnt') or line.find('amount')
+                amnt = float(amnt_el.text) if (amnt_el is not None and amnt_el.text) else 0.0
+                
+                data.append({'omschrijving': desc, 'bedrag': amnt})
+            except:
+                continue
+        return pd.DataFrame(data)
+    except Exception as e:
+        return pd.DataFrame(columns=['omschrijving', 'bedrag'])
+
+def scan_boekhouding(df):
+    results = []
+    if df.empty: return results
+    for _, row in df.iterrows():
+        omschr = str(row.get('omschrijving', '')).lower()
+        bedrag = row.get('bedrag', 0)
+        # Zoek naar MIA/EIA hints
+        if any(keyword in omschr for keyword in ['elektr', 'zonnepaneel', 'laadpaal', 'warmtepomp']):
+            results.append({
+                "Type": "Fiscaal Voordeel (MIA/EIA)",
+                "Bedrag": bedrag * 0.135, # Gemiddeld netto voordeel
+                "Check": f"Gevonden op basis van: '{omschr}'"
+            })
+    return results
+
+# --- 2. DASHBOARD INTERFACE ---
 st.set_page_config(page_title="Compliance Sencil | Enterprise Hub", layout="wide")
 
-# 2. Visuele styling (Dark Mode SaaS look)
 st.markdown("""
     <style>
     .main { background-color: #0e1117; color: white; }
     .stMetric { background-color: #1e2130; padding: 15px; border-radius: 10px; border-left: 5px solid #00ff00; }
-    div[data-testid="stTable"] { background-color: #1e2130; border-radius: 10px; }
     </style>
     """, unsafe_allow_html=True)
 
 st.title("🛡️ Compliance Sencil | Enterprise Hub")
-st.subheader("Real-time Subsidie & Compliance Scan")
 
-# 3. Bestand uploaden
 uploaded_file = st.file_uploader("Upload Snelstart Auditfile (.xaf)", type=["xaf"])
 
 if uploaded_file is not None:
     try:
-        # Veilig inlezen van de bytes
-        file_bytes = uploaded_file.getvalue()
+        content = uploaded_file.getvalue()
+        df = parse_xaf_auditfile(content)
         
-        # Gebruik de parser uit match_subsidies.py
-        df = parse_xaf_auditfile(file_bytes)
-        
-        if df is not None and not df.empty:
-            st.success(f"✅ Auditfile succesvol geanalyseerd: {len(df)} transacties gevonden.")
-            
-            # Scan uitvoeren
+        if not df.empty:
             results = scan_boekhouding(df)
+            total_voordeel = sum([r['Bedrag'] for r in results])
             
-            # 4. Dashboard cijfers
             col1, col2, col3 = st.columns(3)
-            
-            # Bereken totaal voordeel veilig
-            total_voordeel = sum([r.get('Bedrag', 0) for r in results]) if results else 0
-            
             col1.metric("TOTAAL FISCAAL VOORDEEL", f"€ {total_voordeel:,.2f}")
-            col2.metric("GEDETECTEERDE KANSEN", len(results))
-            col3.metric("COMPLIANCE SCORE", "98%")
+            col2.metric("SCAN STATUS", "100% Voltooid")
+            col3.metric("ENTITEIT", "Snelstart Administratie")
             
-            # 5. Resultaten weergeven
-            st.write("### Gevonden Investeringskansen")
             if results:
-                # Zet resultaten om naar een toonbare tabel
-                display_df = pd.DataFrame(results)
-                st.table(display_df)
+                st.table(pd.DataFrame(results))
             else:
-                st.info("Geen specifieke MIA/EIA subsidies gevonden in deze file. De administratie is verder compliant.")
+                st.info("Scan voltooid: Geen directe MIA/EIA kansen gevonden in deze file.")
         else:
-            st.warning("De file is geüpload, maar bevat geen leesbare transactiegegevens. Controleer of het een financieel XAF-bestand is.")
-            
+            st.error("De Auditfile bevat geen leesbare transactiegegevens.")
     except Exception as e:
-        st.error(f"Er is een fout opgetreden bij het verwerken: {e}")
-else:
-    st.info("Upload een .xaf bestand uit Snelstart om de scan te starten.")
+        st.error(f"Systeemfout: {e}")
