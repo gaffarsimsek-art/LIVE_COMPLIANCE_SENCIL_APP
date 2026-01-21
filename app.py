@@ -2,83 +2,100 @@ import streamlit as st
 import pandas as pd
 import re
 
-# 1. PARSER (Nu met extra checks voor Snelstart-tags)
-def parse_xaf_safe(file_content):
+# 1. DE ULTIEME PARSER (Getest op Ave Export bestand)
+def parse_xaf_final(file_content):
     try:
-        # Decodeer de file
-        text = file_content.decode('iso-8859-1', errors='ignore')
+        # Stap 1: Forceer leesbaarheid, negeer vreemde tekens
+        text = file_content.decode('latin-1', errors='ignore')
         
-        # Zoek alle transactieregels
-        lines = re.findall(r'<trLine>.*?</trLine>', text, re.DOTALL)
+        # Stap 2: Zoek alle regels (trLine)
+        # We gebruiken een zeer brede zoekopdracht om niets te missen
+        lines = re.findall(r'<trLine>(.*?)</trLine>', text, re.DOTALL)
         
-        data = []
+        extracted_data = []
         for line in lines:
-            # We zoeken naar accID, amnt en description (Snelstart gebruikt de lange naam)
-            acc_match = re.search(r'<accID>(.*?)</accID>', line)
-            desc_match = re.search(r'<description>(.*?)</description>', line) or re.search(r'<desc>(.*?)</desc>', line)
-            amnt_match = re.search(r'<amnt>(.*?)</amnt>', line)
+            # Snelstart specifieke tags uit jouw bestand
+            acc = re.search(r'<accID>(.*?)</accID>', line)
+            desc = re.search(r'<desc>(.*?)</desc>', line)
+            amnt = re.search(r'<amnt>(.*?)</amnt>', line)
             
-            if acc_match and amnt_match:
-                acc = acc_match.group(1)
-                desc = desc_match.group(1) if desc_match else "Geen omschrijving"
+            if acc and amnt:
+                val = amnt.group(1).replace(',', '.') # Zorg dat komma's punten worden
                 try:
-                    amnt = abs(float(amnt_match.group(1)))
+                    num_val = abs(float(val))
+                    if num_val > 0:
+                        extracted_data.append({
+                            'rekening': acc.group(1),
+                            'omschrijving': desc.group(1) if desc else "Geen omschrijving",
+                            'bedrag': num_val
+                        })
                 except:
-                    amnt = 0.0
-                
-                if amnt > 0:
-                    data.append({'rekening': acc, 'omschrijving': desc, 'bedrag': amnt})
-        
-        return pd.DataFrame(data)
+                    continue
+        return pd.DataFrame(extracted_data)
     except Exception as e:
-        st.error(f"Fout bij inlezen: {e}")
+        st.error(f"Leesfout: {e}")
         return pd.DataFrame()
 
-def scan_boekhouding(df):
+def analyseer_subsidies(df):
     results = []
     if df.empty: return results
     
-    # Verwijder dubbele boekingen (Debet/Credit)
-    df_unique = df.drop_duplicates(subset=['omschrijving', 'bedrag'])
+    # Verwijder dubbele boekingen
+    df = df.drop_duplicates(subset=['omschrijving', 'bedrag'])
     
-    for _, row in df_unique.iterrows():
+    for _, row in df.iterrows():
         d = str(row['omschrijving']).lower()
         a = str(row['rekening'])
         b = row['bedrag']
         
-        # Specifieke checks voor Ave Export & Universeel
-        # 1. MIA/EIA (Elektrisch, Zonne, etc.)
-        if any(x in d for x in ['elek', 'zon', 'laad', 'accu', 'warmte']):
-            results.append({"Type": "MIA/EIA Potentieel", "Item": row['omschrijving'], "Investering": b, "Voordeel": b * 0.135})
-        
-        # 2. KIA (Investeringen op balansrekeningen < 1000 of computers)
-        elif (a.isdigit() and int(a) < 1000) or any(x in d for x in ['hp ', 'comp', 'pc', 'laptop', 'apple', 'macbook']):
+        # KIA Check (Inventaris, computers, machines)
+        # Rekening 100 is Inventaris bij Ave Export
+        if a == '100' or any(x in d for x in ['hp ', 'computer', 'laptop', 'server', 'inventaris']):
             if b >= 450:
-                results.append({"Type": "KIA Potentieel", "Item": row['omschrijving'], "Investering": b, "Voordeel": b * 0.28})
+                results.append({"Type": "KIA (Investeringsaftrek)", "Item": row['omschrijving'], "Bedrag": b, "Fiscaal Voordeel": b * 0.28})
+        
+        # MIA/EIA Check (Duurzaam)
+        elif any(x in d for x in ['elek', 'zonne', 'laad', 'accu', 'warmte']):
+            if b > 2000:
+                results.append({"Type": "MIA/EIA (Milieu/Energie)", "Item": row['omschrijving'], "Bedrag": b, "Fiscaal Voordeel": b * 0.135})
                 
     return results
 
-# 2. DE INTERFACE (Zwart met Contrast)
+# 2. HET DASHBOARD
 st.set_page_config(page_title="Compliance Sencil", layout="wide")
 
+# Styling: Forceer contrast
 st.markdown("""
     <style>
-    .stApp { background-color: #0b0e11; color: white; }
-    [data-testid="stMetricValue"] { color: #00ff41 !important; font-weight: bold; }
-    h1, h2, h3 { color: white !important; }
+    .stApp { background-color: #0b0e14; color: white; }
+    .stMetric { background-color: #161b22; border: 1px solid #30363d; border-radius: 10px; padding: 15px; }
+    [data-testid="stMetricValue"] { color: #00ff41 !important; }
     </style>
     """, unsafe_allow_html=True)
 
 st.title("🛡️ Compliance Sencil | Enterprise Hub")
 
-uploaded_file = st.file_uploader("Upload .xaf bestand", type=["xaf"])
+file = st.file_uploader("Upload Snelstart Auditfile (.xaf)", type=["xaf"])
 
-if uploaded_file:
-    # Voorkom crash door try/except om de hele flow
-    try:
-        df = parse_xaf_safe(uploaded_file.getvalue())
+if file:
+    df = parse_xaf_final(file.getvalue())
+    
+    if not df.empty:
+        hits = analyseer_subsidies(df)
         
-        if not df.empty:
-            hits = scan_boekhouding(df)
-            
-            c1, c2, c3 = st.columns
+        c1, c2, c3 = st.columns(3)
+        totaal = sum([h['Fiscaal Voordeel'] for h in hits])
+        
+        c1.metric("TOTAAL VOORDEEL", f"€ {totaal:,.2f}")
+        c2.metric("GEDETECTEERD", len(hits))
+        c3.metric("STATUS", "ANALYSE VOLTOOID")
+        
+        if hits:
+            st.write("### Gevonden Investeringskansen")
+            st.table(pd.DataFrame(hits))
+        else:
+            st.info("Geen investeringen boven de drempelwaarde (€450) gevonden.")
+    else:
+        st.warning("Kon geen transacties vinden. Is dit het juiste XAF bestand?")
+else:
+    st.info("Upload een bestand om de scan te starten.")
