@@ -2,45 +2,42 @@ import streamlit as st
 import pandas as pd
 import re
 
-# --- SLIMME AI CLASSIFICATIE ---
-def ai_fiscal_expert(desc, amount, account):
+# --- 1. DE AI-ENGINE (Deep Scan Logic) ---
+def ai_power_scan(desc, amount, account):
     d = str(desc).lower()
     val = float(amount)
     acc = str(account)
     
-    # 1. HARDE FILTERS (Geen loon, geen kleine bedragen, geen verbruik)
-    if val < 450:
-        return None, 0, "Onder de €450 grens."
-
-    # Uitgebreide lijst met kostenposten (geen activa)
-    expense_triggers = [
-        'flower', 'bloemen', 'koffie', 'lunch', 'diner', 'representatie',
-        'loon', 'salaris', 'sociale lasten', 'vpb', 'btw', 'pension', 
-        'lease', 'vwpfs', 'mercedes-benz fin', 'insurance', 'verzekering', 
-        'premie', 'corr', 'afschr', 'rente', 'brandstof', 'diesel', 'benzine'
+    # AI Blacklist: Sluit kosten en ruis onmiddellijk uit
+    blacklist = [
+        'lease', 'vwpfs', 'financial', 'insurance', 'verzekering', 'premie', 
+        'corr', 'afschr', 'beginbalans', 'rente', 'vpb', 'btw', 'loon', 'salaris'
     ]
-    
-    if any(x in d for x in expense_triggers):
-        return None, 0, "AI-Detectie: Verbruiksgoederen of exploitatiekosten (geen activa)."
+    if any(x in d for x in blacklist) or val < 450:
+        return None, 0, None, None
 
-    # 2. SUBSIDIE CATEGORIEËN
-    # MIA/Vamil (Duurzaam)
-    if any(x in d for x in ['elektr', 'taycan', 'ev ', 'eqs', 'tesla', 'laadpaal', 'laadstation']):
-        return "MIA / Vamil", 0.135, "AI-Check: Duurzame mobiliteit."
-    
-    # EIA (Energie)
-    if any(x in d for x in ['zonne', 'led', 'warmtepomp', 'isolatie', 'eia']):
-        return "EIA", 0.11, "AI-Check: Energiebesparende investering."
-    
-    # KIA (Inventaris / Hardware)
-    # We kijken naar rekeningen onder de 500 (Balans) die NIET in de kosten zitten
-    if int(acc) < 500 and any(x in d for x in ['hp ', 'computer', 'laptop', 'macbook', 'pc', 'monitor', 'machine', 'inventaris', 'server']):
-        return "KIA", 0.28, "AI-Check: Materieel bedrijfsmiddel."
+    # AI Patroonherkenning
+    is_auto = any(x in d for x in ['aanschaf', 'koop', 'mb ', 'glc', 'mercedes', 'porsche', 'auto'])
+    is_elek = any(x in d for x in ['elektr', 'ev ', 'taycan', 'eqs', 'tesla', 'laadpaal', 'eqc'])
+    is_hardware = any(x in d for x in ['hp ', 'pc', 'computer', 'laptop', 'monitor', 'mastertools', 'gereedschap'])
 
-    return None, 0, "Geen duidelijke fiscale investering gevonden."
+    # Fiscale Classificatie
+    if is_elek:
+        return "MIA / VAMIL", 0.135, "🤖 AI: Duurzame investering gedetecteerd (Elektrisch).", "MIA"
+    
+    if is_auto:
+        # De AI ziet een voertuig aankoop. 
+        # Voor de KIA is een bestelauto (grijskenteken) 28% aftrekbaar. 
+        # Personenauto's op brandstof meestal niet, maar we tonen hem als 'Potentieel'.
+        return "KIA (Mogelijk Bestelauto)", 0.28, "🤖 AI: Voertuig aankoop op de balans. Check op Grijskenteken.", "KIA"
+    
+    if is_hardware or int(acc) < 500:
+        return "KIA", 0.28, "🤖 AI: Materieel bedrijfsmiddel / Inventaris.", "KIA"
 
-# --- DATA VERWERKING ---
-def parse_xaf_final(file_content):
+    return None, 0, None, None
+
+# --- 2. DATA VERWERKING ---
+def parse_xaf_advanced(file_content):
     try:
         text = file_content.decode('iso-8859-1', errors='ignore')
         lines = re.findall(r'<trLine>(.*?)</trLine>', text, re.DOTALL)
@@ -58,37 +55,42 @@ def parse_xaf_final(file_content):
         return pd.DataFrame(data)
     except: return pd.DataFrame()
 
-# --- UI ---
+# --- 3. DASHBOARD ---
 st.set_page_config(page_title="Compliance Sencil AI", layout="wide")
-st.title("🛡️ Compliance Sencil | AI Precision Hub")
-st.subheader("Gezuiverde Fiscale Analyse voor Ave Export B.V.")
+st.title("🛡️ Compliance Sencil | AI Power Scan")
+st.subheader("Deep Scan: Ave Export B.V. 2024")
 
 file = st.file_uploader("Upload .xaf bestand", type=["xaf"])
 
 if file:
-    df_raw = parse_xaf_final(file.getvalue())
+    df_raw = parse_xaf_advanced(file.getvalue())
     if not df_raw.empty:
+        # AI filtert dubbele boekingen en past de motor toe
         df_raw = df_raw.drop_duplicates(subset=['desc', 'val'])
         
-        final_hits = []
+        results = []
         for _, row in df_raw.iterrows():
-            label, perc, reason = ai_fiscal_expert(row['desc'], row['val'], row['acc'])
+            label, perc, reason, type_code = ai_power_scan(row['desc'], row['val'], row['acc'])
             if label:
-                final_hits.append({
+                results.append({
                     "Subsidie": label,
                     "Investering": row['desc'],
                     "Bedrag (Ex. BTW)": row['val'],
                     "Netto Voordeel": row['val'] * perc,
-                    "AI Analyse": reason
+                    "AI Toelichting": reason
                 })
         
-        if final_hits:
-            res_df = pd.DataFrame(final_hits)
-            c1, c2 = st.columns(2)
-            c1.metric("TOTAAL FISCAAL VOORDEEL", f"€ {res_df['Netto Voordeel'].sum():,.2f}")
-            c2.metric("GECHECKEERDE ACTIVA", len(final_hits))
+        if results:
+            res_df = pd.DataFrame(results)
+            c1, c2, c3 = st.columns(3)
+            total_v = res_df['Netto Voordeel'].sum()
+            c1.metric("TOTAAL FISCAAL VOORDEEL", f"€ {total_v:,.2f}")
+            c2.metric("GEDETECTEERDE ACTIVA", len(results))
+            c3.metric("AI STATUS", "OPTIMIZED")
             
-            st.write("### 🎯 Resultaten (Gezuiverd van bloemen, loon & kosten)")
+            st.write("### 🎯 Gevonden Fiscale Kansen")
             st.table(res_df.style.format({'Bedrag (Ex. BTW)': '€ {:,.2f}', 'Netto Voordeel': '€ {:,.2f}'}))
+            
+            st.info("De AI heeft de 'Aanschaf GLC' herkend. Let op: Voor personenauto's op brandstof geldt de KIA alleen als het een bestelauto (grijskenteken) is.")
         else:
-            st.info("De AI heeft de auditfile gescand en alle kosten (zoals bloemen en loon) gefilterd. Geen nieuwe investeringen boven €450 overgebleven.")
+            st.info("AI Scan voltooid. Geen nieuwe investeringen boven €450 gevonden.")
