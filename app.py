@@ -2,20 +2,24 @@ import streamlit as st
 import pandas as pd
 import re
 
-# 1. FUNCTIES
+# 1. FUNCTIES VOOR KENTEKENS EN FILTERING
 def extract_kenteken(text):
     patroon = r'\b([A-Z0-9]{2}-?[A-Z0-9]{2}-?[A-Z0-9]{2}|[A-Z]{1}-?\d{3}-?[A-Z]{2})\b'
     match = re.search(patroon, str(text).upper())
     return match.group(0) if match else None
 
-def parse_xaf_ultra_safe(file_content):
+def parse_xaf_no_costs(file_content):
     try:
         text = file_content.decode('iso-8859-1', errors='ignore')
         lines = re.findall(r'<trLine>(.*?)</trLine>', text, re.DOTALL)
         data = []
         
-        # Harde uitsluitlijst voor lease en kosten
-        blacklist = ['vwpfs', 'mercedes-benz fin', 'financial', 'lease', 'insurance', 'verzekering', 'wa casco', 'premie', 'corr', 'afschr', 'termijn']
+        # UITGEBREIDE ZWARTE LIJST (Deze regels gaan er direct uit)
+        blacklist = [
+            'vwpfs', 'mercedes-benz fin', 'financial', 'lease', 'insurance', 
+            'verzekering', 'wa casco', 'premie', 'corr', 'afschr', 'termijn', 
+            'rente', 'beginbalans', 'opening', 'vpb', 'btw', 'loonkosten'
+        ]
 
         for line in lines:
             acc = re.search(r'<accID>(.*?)</accID>', line)
@@ -27,83 +31,89 @@ def parse_xaf_ultra_safe(file_content):
                 description = desc.group(1) if desc else ""
                 clean_desc = description.lower()
                 
-                # Check blacklist
+                # 1. Filter op zwarte lijst
                 if any(x in clean_desc for x in blacklist):
                     continue
 
-                # Alleen Balans (Activa < 3000) en Debet (Inkoop)
+                # 2. Filter op Balans (Rekening < 3000) en alleen Inkomsten/Activa (Debet)
                 if acc.group(1).isdigit() and int(acc.group(1)) < 3000 and tp.group(1) == 'D':
                     try:
                         val = float(amnt.group(1).replace(',', '.'))
-                        if val >= 450:
+                        if val >= 450: # Alleen serieuze posten
                             data.append({'rekening': acc.group(1), 'omschrijving': description, 'bedrag': val})
                     except: continue
         return pd.DataFrame(data)
     except Exception as e:
-        st.error(f"Fout bij verwerken bestand: {e}")
+        st.error(f"Fout: {e}")
         return pd.DataFrame()
 
-# 2. UI DESIGN
+# 2. DASHBOARD DESIGN
 st.set_page_config(page_title="Compliance Sencil", layout="wide")
-st.title("🛡️ Compliance Sencil | Precision Hub")
+st.title("🛡️ Compliance Sencil | Precision Activa Scan")
 
 uploaded_file = st.file_uploader("Upload .xaf bestand", type=["xaf"])
 
 if uploaded_file:
-    df = parse_xaf_ultra_safe(uploaded_file.getvalue())
+    df = parse_xaf_no_costs(uploaded_file.getvalue())
     
     if not df.empty:
-        # Filter dubbelingen
         df = df.drop_duplicates(subset=['omschrijving', 'bedrag'])
         
-        st.subheader("🔍 Potentiële Activa (Gefilterd op Balans)")
+        st.subheader("📋 Bruto Activa Lijst (Gefilterd op Balans)")
+        st.write("Onderstaande posten staan op de balansrekeningen. Gebruik de RDW-knop om kosten van investeringen te scheiden.")
         
-        results = []
+        raw_results = []
         for _, row in df.iterrows():
             ken = extract_kenteken(row['omschrijving'])
-            results.append({
-                "Activa": row['omschrijving'],
+            raw_results.append({
+                "Post": row['omschrijving'],
                 "Bedrag": row['bedrag'],
-                "Kenteken": ken if ken else "Geen voertuig"
+                "Kenteken": ken if ken else "Geen"
             })
         
-        res_df = pd.DataFrame(results)
-        st.table(res_df.style.format({'Bedrag': '€ {:,.2f}'}))
+        st.table(pd.DataFrame(raw_results).style.format({'Bedrag': '€ {:,.2f}'}))
 
-        # DE RDW CHECK KNOP
+        # DE MENSELIJKE RDW LOGICA KNOP
         st.write("---")
-        if st.button("🏁 START RDW & SUBSIDIE CHECK"):
-            st.subheader("🎯 Resultaten Fiscale Analyse")
+        if st.button("🚀 START RDW INTELLIGENCE & SUBSIDIE SCAN"):
+            st.subheader("🎯 Gevalideerde Fiscale Kansen")
             
-            final_list = []
-            for item in results:
-                d = item['Activa'].lower()
-                # RDW Logica: Alleen MIA als het elektrisch is
-                is_elek = any(x in d for x in ['elektr', 'taycan', 'ev', 'eqs', 'e-tron', 'tesla'])
+            final_hits = []
+            for item in raw_results:
+                d = item['Post'].lower()
+                ken = item['Kenteken']
                 
-                # Als het een voertuig is maar niet elektrisch -> overslaan (geen MIA/KIA voor brandstof personenauto)
-                if item['Kenteken'] != "Geen voertuig" and not is_elek:
-                    st.write(f"❌ {item['Kenteken']} ({item['Activa']}): Overgeslagen (Brandstofvoertuig)")
+                # MENSELIJK DENKEN:
+                # Is het een auto? Check of hij elektrisch is (alleen dan MIA/KIA)
+                is_elek = any(x in d for x in ['elektr', 'taycan', 'ev', 'eqs', 'tesla', 'e-tron'])
+                
+                # Als het een voertuig is maar GEEN elektrische aanduiding heeft -> SKIP (Brandstof lease/kosten)
+                if ken != "Geen" and not is_elek:
+                    st.write(f"⚠️ **{ken}** ({item['Post']}) overgeslagen: Brandstofvoertuig of leasekosten.")
                     continue
                 
-                perc = 0.135 if is_elek else 0.28
-                cat = "MIA / VAMIL" if is_elek else "KIA"
+                # Is het een computer/inventaris?
+                is_pc = any(x in d for x in ['hp', 'computer', 'laptop', 'macbook', 'pc', 'monitor'])
                 
-                final_list.append({
-                    "Regeling": cat,
-                    "Investering": item['Activa'],
-                    "Bedrag": item['Bedrag'],
-                    "Fiscaal Voordeel": item['Bedrag'] * perc
-                })
+                if is_pc or is_elek or item['Bedrag'] > 2000: # Filter voor rest-ruis
+                    perc = 0.135 if is_elek else 0.28
+                    cat = "MIA / VAMIL" if is_elek else "KIA"
+                    
+                    final_hits.append({
+                        "Regeling": cat,
+                        "Investering": item['Post'],
+                        "Bedrag": item['Bedrag'],
+                        "Fiscaal Voordeel": item['Bedrag'] * perc
+                    })
             
-            if final_list:
-                final_df = pd.DataFrame(final_list)
-                st.success("Analyse voltooid!")
+            if final_hits:
+                final_df = pd.DataFrame(final_hits)
+                st.success("Analyse voltooid! De onderstaande posten zijn echte investeringen.")
                 st.table(final_df.style.format({'Bedrag': '€ {:,.2f}', 'Fiscaal Voordeel': '€ {:,.2f}'}))
                 
-                totaal_v = sum([h['Fiscaal Voordeel'] for h in final_list])
-                st.metric("TOTAAL FISCAAL VOORDEEL", f"€ {totaal_v:,.2f}")
+                totaal_v = sum([h['Fiscaal Voordeel'] for h in final_hits])
+                st.metric("TOTAAL NETTO VOORDEEL", f"€ {totaal_v:,.2f}")
             else:
-                st.info("Geen subsidiabele posten gevonden na RDW check.")
+                st.info("Geen subsidiabele investeringen overgebleven na de RDW/Menselijke check.")
     else:
-        st.warning("Geen activa gevonden. Controleer of dit een export van de balans is.")
+        st.warning("Geen activa gevonden op de balans.")
